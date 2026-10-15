@@ -1,177 +1,134 @@
-#!/usr/bin/env python3
-"""Venue-by-venue web research using the OpenAI Responses API.
+"""No-paid-API public-source collector for the independent gig finder.
 
-This is intentionally a research stage, not a scraper. It makes one explicit
-web-search-enabled model request per configured venue, preserves raw responses,
-and marks coverage honestly. It never silently substitutes scraping when the
-API key is absent.
+Fetches configured public venue pages and extracts event-shaped JSON-LD plus
+date-bearing event links. It does not claim exhaustive coverage: ordinary HTML
+pages frequently hide listings behind JavaScript, ticketing APIs, or pagination.
 """
 from __future__ import annotations
-
-import csv
-import datetime as dt
-import json
-import os
-import pathlib
-import sys
-import time
-import urllib.error
-import urllib.request
+import csv, datetime as dt, html, json, os, pathlib, re, sys, time, urllib.error, urllib.request
+from html.parser import HTMLParser
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
 VENUES = ROOT / "config" / "venue_sources.csv"
 OUT = pathlib.Path(os.environ.get("RUN_DIR", "artifacts/current"))
-API_URL = "https://api.openai.com/v1/responses"
-MODEL = os.environ.get("OPENAI_MODEL", "gpt-4.1-mini")
+UA = "Mozilla/5.0 (compatible; RileyCoeGigFinder/2.0; public-calendar-check)"
+TIMEOUT = 25
+MAX_BYTES = 3_000_000
 
+class Links(HTMLParser):
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.links=[]; self.scripts=[]; self._script=False; self._script_type=""
+        self._script_data=[]
+    def handle_starttag(self, tag, attrs):
+        a=dict(attrs)
+        if tag.lower()=="a" and a.get("href"):
+            self.links.append({"href":a["href"],"text":""})
+            self._last=len(self.links)-1
+        if tag.lower()=="script":
+            self._script=True; self._script_type=a.get("type","").lower(); self._script_data=[]
+    def handle_data(self,data):
+        if self._script: self._script_data.append(data)
+        elif getattr(self,"_last",None) is not None:
+            self.links[self._last]["text"] += data
+    def handle_endtag(self,tag):
+        if tag.lower()=="script" and self._script:
+            if "ld+json" in self._script_type:
+                self.scripts.append("".join(self._script_data))
+            self._script=False; self._script_data=[]
 
-def request_json(url: str, payload: dict, api_key: str) -> dict:
-    body = json.dumps(payload).encode("utf-8")
-    req = urllib.request.Request(
-        url, data=body, method="POST",
-        headers={"Authorization": f"Bearer {api_key}",
-                 "Content-Type": "application/json"})
-    for attempt in range(3):
+def fetch(url):
+    req=urllib.request.Request(url,headers={"User-Agent":UA,"Accept":"text/html,application/xhtml+xml"})
+    with urllib.request.urlopen(req,timeout=TIMEOUT) as r:
+        data=r.read(MAX_BYTES+1)
+        if len(data)>MAX_BYTES: data=data[:MAX_BYTES]
+        charset=r.headers.get_content_charset() or "utf-8"
+        return r.geturl(),data.decode(charset,errors="replace"),r.status
+
+def absolutize(base,url):
+    from urllib.parse import urljoin,urlparse
+    result=urljoin(base,html.unescape(url.strip()))
+    return result if urlparse(result).scheme in ("http","https") else ""
+
+def walk_jsonld(obj):
+    if isinstance(obj,dict):
+        typ=obj.get("@type",[])
+        if isinstance(typ,str): typ=[typ]
+        if any(t.lower() in {"event","music event","festival"} for t in typ):
+            yield obj
+        for value in obj.values(): yield from walk_jsonld(value)
+    elif isinstance(obj,list):
+        for value in obj: yield from walk_jsonld(value)
+
+def textval(value):
+    if isinstance(value,dict): return str(value.get("name") or value.get("url") or "")
+    if isinstance(value,list): return "; ".join(filter(None,(textval(x) for x in value)))
+    return str(value or "")
+
+def event_from_jsonld(obj, venue, base):
+    start=str(obj.get("startDate",""))[:10]
+    location=obj.get("location",{})
+    room=textval(location.get("name","")) if isinstance(location,dict) else textval(location)
+    performers=obj.get("performer",obj.get("performers",[]))
+    artists=[textval(x).strip() for x in (performers if isinstance(performers,list) else [performers])]
+    offers=obj.get("offers",{})
+    if isinstance(offers,list): offers=offers[0] if offers else {}
+    event_url=absolutize(base,str(obj.get("url") or ""))
+    ticket_url=absolutize(base,str(offers.get("url") or "")) if isinstance(offers,dict) else ""
+    return {"event_title":textval(obj.get("name","")).strip(),"date":start,
+      "artists":[x for x in artists if x],"venue_room":room or venue,
+      "event_url":event_url,"ticket_url":ticket_url,"evidence_quote":"JSON-LD Event metadata extracted from fetched public page",
+      "source_type":"official","confidence":"medium","notes":"Structured metadata; confirm against visible event page",
+      "research_venue":venue,"research_status":"public_source_candidate"}
+
+def main():
+    start=dt.date.fromisoformat(os.environ.get("WINDOW_START") or dt.datetime.now(dt.timezone.utc).date().isoformat())
+    end=dt.date.fromisoformat(os.environ.get("WINDOW_END") or (start+dt.timedelta(days=13)).isoformat())
+    OUT.mkdir(parents=True,exist_ok=True); rawdir=OUT/"raw_pages"; rawdir.mkdir(exist_ok=True)
+    with VENUES.open(encoding="utf-8-sig",newline="") as f: venues=list(csv.DictReader(f))
+    all_events=[]; ledger=[]
+    for i,v in enumerate(venues,1):
+        name=v.get("venue","").strip(); url=v.get("source_url","").strip()
+        row={"venue":name,"url":url,"status":"failed","events":0,"sources_checked":[],"limitations":[]}
+        if not name or not url.startswith("https://"):
+            row["limitations"].append("Missing venue name or HTTPS source URL"); ledger.append(row); continue
+        print(f"[{i}/{len(venues)}] Fetching {name}: {url}",flush=True)
         try:
-            with urllib.request.urlopen(req, timeout=180) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:2000]
-            if exc.code in (429, 500, 502, 503, 504) and attempt < 2:
-                time.sleep(3 * (attempt + 1))
-                continue
-            raise RuntimeError(f"Responses API HTTP {exc.code}: {detail}") from exc
-        except (TimeoutError, urllib.error.URLError) as exc:
-            if attempt < 2:
-                time.sleep(3 * (attempt + 1))
-                continue
-            raise RuntimeError(f"Responses API request failed: {exc}") from exc
-    raise RuntimeError("Responses API retries exhausted")
+            final,body,status=fetch(url)
+            (rawdir/f"{i:02d}.html").write_text(body,encoding="utf-8")
+            parser=Links(); parser.feed(body)
+            row["sources_checked"].append({"url":final,"kind":"official","result":"checked","note":f"HTTP {status}; {len(body)} chars; parsed structured metadata and links"})
+            found=[]
+            for blob in parser.scripts:
+                try: parsed=json.loads(blob)
+                except Exception: continue
+                for obj in walk_jsonld(parsed):
+                    event=event_from_jsonld(obj,name,final)
+                    try: date=dt.date.fromisoformat(event["date"])
+                    except ValueError: continue
+                    if start<=date<=end and event["event_title"] and event["event_url"]:
+                        found.append(event)
+            # Record useful dated event links for later inspection, but don't fabricate event records.
+            dated_links=[]
+            for link in parser.links:
+                href=absolutize(final,link["href"]); label=" ".join(link["text"].split())
+                if href and (re.search(r"20\d{2}[-/]\d{1,2}[-/]\d{1,2}",href) or re.search(r"\b(?:gig|event|show|tickets|what.?s on)\b",label,re.I)):
+                    dated_links.append({"url":href,"label":label[:180]})
+            row["events"]=len(found); row["status"]="partial"
+            row["limitations"].append("Static public-page extraction only; JavaScript, pagination, linked detail pages and ticketing/local listings may be missing.")
+            if not parser.scripts: row["limitations"].append("No JSON-LD scripts were present on the fetched page.")
+            row["candidate_links"]=dated_links[:100]
+            all_events.extend(found)
+        except Exception as e:
+            row["limitations"].append(f"{type(e).__name__}: {str(e)[:500]}")
+            print(f"  FAILED: {row['limitations'][-1]}",file=sys.stderr,flush=True)
+        ledger.append(row); time.sleep(0.4)
+    (OUT/"research_events.json").write_text(json.dumps(all_events,ensure_ascii=False,indent=2),encoding="utf-8")
+    (OUT/"coverage_ledger.json").write_text(json.dumps({"window_start":start.isoformat(),"window_end":end.isoformat(),"venue_count":len(venues),"events_found":len(all_events),"venues":ledger},ensure_ascii=False,indent=2),encoding="utf-8")
+    failed=sum(x["status"]=="failed" for x in ledger)
+    partial=sum(x["status"]!="complete" for x in ledger)
+    print(f"Public-source collection finished: {len(all_events)} structured event candidates; {len(venues)-failed}/{len(venues)} pages fetched; {partial}/{len(venues)} venues have explicitly partial/non-complete coverage.")
+    # Public-page extraction cannot establish exhaustive coverage; exit success means the run completed, not that coverage is complete.
+    return 0 if failed < len(venues) else 1
 
-
-def extract_output_text(response: dict) -> str:
-    chunks = []
-    for item in response.get("output", []):
-        if item.get("type") != "message":
-            continue
-        for part in item.get("content", []):
-            if part.get("type") == "output_text" and part.get("text"):
-                chunks.append(part["text"])
-    if not chunks:
-        raise ValueError("API response contained no output_text")
-    return "\n".join(chunks)
-
-
-def parse_json_text(text: str) -> dict:
-    cleaned = text.strip()
-    if cleaned.startswith("```"):
-        cleaned = cleaned.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-    start, end = cleaned.find("{"), cleaned.rfind("}")
-    if start < 0 or end < start:
-        raise ValueError("Model output did not contain a JSON object")
-    return json.loads(cleaned[start:end + 1])
-
-
-def build_prompt(venue: dict, start: str, end: str) -> str:
-    return f"""Research live music and gig events in Newcastle/Gateshead, UK, at this venue for the inclusive dates {start} through {end}.
-Venue identity: {venue['venue']}
-Official starting source: {venue['source_url']}
-Venue-specific guidance: {venue.get('notes', '')}
-
-Use web search actively. Inspect the official venue/promoter calendar and individual event pages, and search ticketing platforms and reputable local listings to find events the official page may omit. Follow relevant event/ticket links. Include announced support acts and multi-artist bills. Do not invent dates, billing, or URLs. Dates must fall inside the requested window. The Cluny and Cluny 2 are distinct room identities even though they share a calendar; only assign a room when evidence supports it. The Glasshouse/Sage Two similarly need room-specific classification. Riverside is a status-check row; do not infer events from absence.
-
-Return exactly one JSON object, no markdown, with this shape:
-{{
- "venue": "{venue['venue']}",
- "window_start": "{start}",
- "window_end": "{end}",
- "coverage_status": "complete|partial|failed",
- "sources_checked": [{{"url":"https://...","kind":"official|ticketing|local_listing","result":"checked|blocked|not_found","note":"short factual note"}}],
- "events": [
-  {{"event_title":"...", "date":"YYYY-MM-DD", "artists":["..."], "venue_room":"...",
-    "event_url":"https://...", "ticket_url":"https://... or empty",
-    "evidence_quote":"short text supporting date/billing", "source_type":"official|ticketing|local_listing",
-    "confidence":"high|medium|low", "notes":"..." }}
- ],
- "limitations": ["specific access or coverage limitation, if any"]
-}}
-A coverage_status of complete requires a meaningful inspection of the venue's dated listings and linked event pages for the window; otherwise use partial. Use failed only if research could not meaningfully proceed. An empty events list is valid only if the sources checked support that result. Keep sources and event claims evidence-backed. Do not claim to have checked a page you did not inspect."""
-
-
-def main() -> int:
-    key = os.environ.get("OPENAI_API_KEY")
-    if not key:
-        print("ERROR: OPENAI_API_KEY is required. No scraping-only fallback is allowed.", file=sys.stderr)
-        return 2
-    today = dt.datetime.now(dt.timezone.utc).date()
-    start = os.environ.get("WINDOW_START", today.isoformat())
-    end = os.environ.get("WINDOW_END", (today + dt.timedelta(days=13)).isoformat())
-    if dt.date.fromisoformat(end) < dt.date.fromisoformat(start):
-        raise ValueError("WINDOW_END must not precede WINDOW_START")
-    OUT.mkdir(parents=True, exist_ok=True)
-    with VENUES.open(encoding="utf-8-sig", newline="") as f:
-        venues = list(csv.DictReader(f))
-    if not venues:
-        raise RuntimeError(f"No venues loaded from {VENUES}")
-    ledger = []
-    all_events = []
-    raw_dir = OUT / "raw_research"
-    raw_dir.mkdir(parents=True, exist_ok=True)
-    for i, venue in enumerate(venues, 1):
-        name = venue.get("venue", "").strip()
-        if not name or not venue.get("source_url", "").startswith("http"):
-            ledger.append({"venue": name, "status": "failed", "events": 0,
-                           "error": "Missing venue name or valid source URL"})
-            continue
-        print(f"[{i}/{len(venues)}] Researching {name}", flush=True)
-        try:
-            payload = {
-                "model": MODEL,
-                "tools": [{"type": "web_search"}],
-                "input": build_prompt(venue, start, end),
-                "max_output_tokens": 7000
-            }
-            raw = request_json(API_URL, payload, key)
-            (raw_dir / f"{i:02d}-response.json").write_text(
-                json.dumps(raw, ensure_ascii=False, indent=2), encoding="utf-8")
-            result = parse_json_text(extract_output_text(raw))
-            if result.get("venue") != name:
-                raise ValueError(f"Venue identity mismatch: {result.get('venue')!r}")
-            events = result.get("events", [])
-            if not isinstance(events, list):
-                raise ValueError("events must be a JSON array")
-            for event in events:
-                event["research_venue"] = name
-                event["research_status"] = "candidate_needs_deterministic_validation"
-            all_events.extend(events)
-            ledger.append({
-                "venue": name,
-                "status": result.get("coverage_status", "partial"),
-                "events": len(events),
-                "sources_checked": result.get("sources_checked", []),
-                "limitations": result.get("limitations", []),
-                "raw_response": f"raw_research/{i:02d}-response.json"
-            })
-            (raw_dir / f"{i:02d}-parsed.json").write_text(
-                json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as exc:
-            ledger.append({"venue": name, "status": "failed", "events": 0,
-                           "error": f"{type(exc).__name__}: {exc}"})
-            print(f"  FAILED: {exc}", file=sys.stderr, flush=True)
-    (OUT / "research_events.json").write_text(
-        json.dumps(all_events, ensure_ascii=False, indent=2), encoding="utf-8")
-    (OUT / "coverage_ledger.json").write_text(
-        json.dumps({"window_start": start, "window_end": end,
-                    "venue_count": len(venues), "venues": ledger},
-                   ensure_ascii=False, indent=2), encoding="utf-8")
-    failed = sum(row["status"] == "failed" for row in ledger)
-    partial = sum(row["status"] != "complete" for row in ledger)
-    print(f"Research finished: {len(all_events)} candidate events; "
-          f"{len(venues)-failed}/{len(venues)} venue requests returned; "
-          f"{partial}/{len(venues)} venues not marked complete.")
-    # Partial coverage is reported, never falsely promoted to complete.
-    return 0 if failed == 0 and partial == 0 else 1
-
-
-if __name__ == "__main__":
-    raise SystemExit(main())
+if __name__=="__main__": raise SystemExit(main())
