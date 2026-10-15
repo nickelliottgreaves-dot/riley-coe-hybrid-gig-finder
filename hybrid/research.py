@@ -50,7 +50,7 @@ def walk_jsonld(obj):
     if isinstance(obj, dict):
         typ = obj.get("@type", [])
         if isinstance(typ, str): typ = [typ]
-        if any(str(t).lower() in {"event", "music event", "festival"} for t in typ):
+        if any(re.sub(r"[^a-z]", "", str(t).lower()) in {"event", "musicevent", "festival"} for t in typ):
             yield obj
         for value in obj.values(): yield from walk_jsonld(value)
     elif isinstance(obj, list):
