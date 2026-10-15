@@ -4,7 +4,7 @@ Independent v2 project. It uses web-search-enabled AI research for each configur
 
 ## Run
 
-Requires Python 3.12 and the repository Actions secret `OPENAI_API_KEY` (OpenAI API billing is separate from a ChatGPT subscription). Run `python -m unittest discover -s tests`, then set `OPENAI_API_KEY` and run `python -m hybrid.research` followed by `python -m hybrid.match`. Artifacts are written to `artifacts/current`.
+Requires Python 3.12. No paid API key or external API billing is required. Run `python -m unittest discover -s tests`, then run `python -m hybrid.research` followed by `python -m hybrid.match`. Artifacts are written to `artifacts/current` including `report.md`, `artist_matches.csv`, JSON evidence, and a venue coverage ledger.
 
 The weekly schedule is Monday 08:00 UTC. Use Actions → Hybrid gig finder v2 → Run workflow for a manual run. Never put API keys in source files.
 
