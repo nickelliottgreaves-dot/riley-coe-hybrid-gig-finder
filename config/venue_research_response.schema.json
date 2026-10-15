@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Venue research response",
+  "type": "object",
+  "required": ["venue", "window_start", "window_end", "coverage_status", "sources_checked", "events", "limitations"],
+  "properties": {
+    "venue": {"type": "string", "minLength": 1},
+    "window_start": {"type": "string", "format": "date"},
+    "window_end": {"type": "string", "format": "date"},
+    "coverage_status": {"enum": ["complete", "partial", "failed"]},
+    "sources_checked": {"type": "array", "items": {"type": "object", "required": ["url", "kind", "result", "note"], "properties": {"url": {"type": "string"}, "kind": {"enum": ["official", "ticketing", "local_listing"]}, "result": {"enum": ["checked", "blocked", "not_found"]}, "note": {"type": "string"}}}},
+    "events": {"type": "array", "items": {"type": "object", "required": ["event_title", "date", "artists", "venue_room", "event_url", "evidence_quote", "source_type", "confidence"], "properties": {"event_title": {"type": "string"}, "date": {"type": "string", "format": "date"}, "artists": {"type": "array", "items": {"type": "string"}}, "venue_room": {"type": "string"}, "event_url": {"type": "string"}, "ticket_url": {"type": "string"}, "evidence_quote": {"type": "string"}, "source_type": {"enum": ["official", "ticketing", "local_listing"]}, "confidence": {"enum": ["high", "medium", "low"]}, "notes": {"type": "string"}}}},
+    "limitations": {"type": "array", "items": {"type": "string"}}
+  }
+}
