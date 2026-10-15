@@ -96,14 +96,74 @@ def main():
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "validated_events.json").write_text(json.dumps(checked, ensure_ascii=False, indent=2), encoding="utf-8")
     (OUT / "artist_matches.json").write_text(json.dumps(matches, ensure_ascii=False, indent=2), encoding="utf-8")
-    (OUT / "validation_summary.json").write_text(json.dumps({
+
+    # Human-readable report and flat CSV outputs make the result usable without
+    # opening JSON, while keeping source/coverage caveats visible.
+    with (OUT / "artist_matches.csv").open("w", encoding="utf-8", newline="") as f:
+        fields = ["date", "event_title", "matched_artists", "research_venue", "venue_room",
+                  "event_url", "ticket_url", "source_type", "confidence", "evidence_quote",
+                  "validation_status", "notes"]
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in matches:
+            writer.writerow({**row, "matched_artists": "; ".join(row.get("matched_artists", []))})
+    ledger_path = OUT / "coverage_ledger.json"
+    ledger = json.loads(ledger_path.read_text(encoding="utf-8")) if ledger_path.exists() else {}
+    summary = {
         "window_start": start.isoformat(), "window_end": end.isoformat(),
         "artist_pool_entries": len(index), "research_event_count": len(events),
         "valid_candidate_count": sum(not x["validation_reasons"] for x in checked),
-        "invalid_candidate_count": len(invalid), "duplicate_candidate_count": sum(x["validation_status"]=="duplicate_candidate" for x in checked),
+        "invalid_candidate_count": len(invalid),
+        "duplicate_candidate_count": sum(x["validation_status"]=="duplicate_candidate" for x in checked),
         "artist_match_count": len(matches),
-        "matches_are_candidates_not_final_confirmation": True
-    }, indent=2), encoding="utf-8")
+        "matches_are_candidates_not_final_confirmation": True,
+        "venues_total": len(venue_rows),
+        "venues_fetched": sum(x.get("status") != "failed" for x in ledger.get("venues", [])),
+        "venues_complete": sum(x.get("status") == "complete" for x in ledger.get("venues", [])),
+        "venues_partial_or_failed": sum(x.get("status") != "complete" for x in ledger.get("venues", [])),
+    }
+    (OUT / "validation_summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
+    lines = [
+        "# Riley & Coe — gig finder report",
+        "",
+        f"**Window:** {start.isoformat()} to {end.isoformat()} (inclusive)",
+        "",
+        "> **Coverage warning:** this no-cost run extracts accessible public-page metadata. It is not proof that every venue calendar, ticket page, or local listing was checked. Treat matches as leads to verify, not confirmed gig recommendations.",
+        "",
+        "## Run summary",
+        "",
+        f"- Artist names/aliases indexed: {len(index)}",
+        f"- Research event candidates: {len(events)}",
+        f"- Valid candidates: {summary['valid_candidate_count']}",
+        f"- Invalid candidates: {len(invalid)}",
+        f"- Duplicate candidates: {summary['duplicate_candidate_count']}",
+        f"- Artist-match leads: {len(matches)}",
+        f"- Venue pages fetched: {summary['venues_fetched']}/{len(venue_rows)}",
+        f"- Venues marked complete: {summary['venues_complete']}/{len(venue_rows)}",
+        "",
+        "## Artist-match leads",
+        ""
+    ]
+    if not matches:
+        lines.append("No artist matches passed deterministic validation in this run. This is not evidence that no relevant gigs exist.")
+    else:
+        for row in matches:
+            lines += [
+                f"### {row.get('date','date unknown')} — {row.get('event_title','Untitled')}",
+                f"- **Matched artist(s):** {', '.join(row.get('matched_artists', []))}",
+                f"- **Venue:** {row.get('research_venue','unknown')} ({row.get('venue_room') or 'room not specified'})",
+                f"- **Event:** {row.get('event_url','')}",
+                f"- **Evidence:** {row.get('evidence_quote','')}",
+                f"- **Confidence:** {row.get('confidence','unknown')} — candidate only",
+                ""
+            ]
+    lines += ["## Venue coverage ledger", ""]
+    for row in ledger.get("venues", []):
+        lines.append(f"- **{row.get('venue','Unknown')}** — {row.get('status','unknown')}; {row.get('events',0)} structured events.")
+        for limitation in row.get("limitations", []):
+            lines.append(f"  - Limitation: {limitation}")
+    (OUT / "report.md").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+
     print(f"Deterministic matching: {len(index)} artist names/aliases; {len(events)} events; {len(matches)} candidate matches; {len(invalid)} invalid.")
     return 0
 
