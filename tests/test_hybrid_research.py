@@ -1,6 +1,7 @@
 import datetime as dt
 import unittest
 from hybrid.research import PageParser, extract_events, relevant_links, walk_jsonld
+from hybrid.search_discovery import parse_date
 
 class ResearchTests(unittest.TestCase):
     def test_jsonld_event_extracted_within_window(self):
@@ -41,6 +42,12 @@ class ResearchTests(unittest.TestCase):
         parser.feed('<a href="/events/2026-10-20-test">Test show</a><a href="/about">About</a>')
         links = relevant_links(parser, "https://example.org/")
         self.assertEqual([x["url"] for x in links], ["https://example.org/events/2026-10-20-test"])
+
+    def test_search_result_date_parsing(self):
+        start, end = dt.date(2026, 10, 15), dt.date(2026, 10, 28)
+        self.assertEqual(parse_date('Tickets 20 October 2026 live', start, end), '2026-10-20')
+        self.assertEqual(parse_date('Event date 2026-10-22', start, end), '2026-10-22')
+        self.assertEqual(parse_date('Event 2026-11-02', start, end), '')
 
     def test_nested_jsonld_event(self):
         obj = {"@type":"@graph", "@graph":[{"@type":"Event","name":"Nested"}]}
