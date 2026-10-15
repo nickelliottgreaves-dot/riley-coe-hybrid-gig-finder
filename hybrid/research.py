@@ -97,7 +97,7 @@ def relevant_links(parser, base):
         label = " ".join(link["text"].split())
         if not url or url in seen or urlparse(url).scheme != "https": continue
         # Follow links that look like event/detail/calendar pages, not arbitrary site links.
-        if re.search(r"(event|gig|show|concert|ticket|what.?s.?on|calendar|listing|live-music|\\b20\\d{2}[-/]\\d{1,2})", url + " " + label, re.I):
+        if re.search(r"(event|gig|show|concert|ticket|what.?s.?on|calendar|listing|live-music|20[0-9]{2}[-/][0-9]{1,2})", url + " " + label, re.I):
             seen.add(url)
             out.append({"url": url, "label": label[:180]})
     return out
@@ -144,7 +144,7 @@ def main():
             # Deduplicate same event emitted by calendar and detail page.
             unique = {}
             for event in found:
-                key = (event["date"], re.sub(r"\\W+", " ", event["event_title"].lower()).strip(), event["event_url"])
+                key = (event["date"], re.sub(r"[^a-z0-9]+", " ", event["event_title"].lower()).strip(), event["event_url"])
                 unique.setdefault(key, event)
             found = list(unique.values())
             row["events"] = len(found); row["status"] = "partial"
