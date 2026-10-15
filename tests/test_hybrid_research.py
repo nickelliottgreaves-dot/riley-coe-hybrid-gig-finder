@@ -49,6 +49,18 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(parse_date('Event date 2026-10-22', start, end), '2026-10-22')
         self.assertEqual(parse_date('Event 2026-11-02', start, end), '')
 
+    def test_visible_listing_without_jsonld_extracts_dated_bill(self):
+        from hybrid.research import extract_visible_events
+        body='<article><p>Fri 16 Oct 2026</p><h3>Byker Grave: Ye Gods + Pale World + Y Gwacter + Depletion</h3><p>The Lubber Fiend</p><a href="https://example.org/events/byker-grave">Byker Grave: Ye Gods + Pale World + Y Gwacter + Depletion</a></article>'
+        events=extract_visible_events(body,"The Lubber Fiend","https://soundbitenortheast.com/newcastle-gigs/",dt.date(2026,10,15),dt.date(2026,10,28))
+        self.assertEqual(len(events),1); self.assertEqual(events[0]["date"],"2026-10-16")
+        self.assertIn("Ye Gods",events[0]["event_title"]); self.assertEqual(events[0]["event_url"],"https://example.org/events/byker-grave")
+
+    def test_visible_listing_excludes_out_of_window_date(self):
+        from hybrid.research import extract_visible_events
+        body='<article><p>Fri 30 Oct 2026</p><h3>Future Show With Support</h3></article>'
+        self.assertEqual(extract_visible_events(body,"Venue","https://example.org/",dt.date(2026,10,15),dt.date(2026,10,28)),[])
+
     def test_nested_jsonld_event(self):
         obj = {"@type":"@graph", "@graph":[{"@type":"Event","name":"Nested"}]}
         self.assertEqual(len(list(walk_jsonld(obj))), 1)
