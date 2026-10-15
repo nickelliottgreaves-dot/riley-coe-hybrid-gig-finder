@@ -65,7 +65,7 @@ def main():
     allowed_venues = {r.get("venue", "").strip() for r in venue_rows}
     start = dt.date.fromisoformat(os.environ.get("WINDOW_START") or dt.datetime.now(dt.timezone.utc).date().isoformat())
     end = dt.date.fromisoformat(os.environ.get("WINDOW_END") or (start + dt.timedelta(days=13)).isoformat())
-    checked, invalid, matches = [], [], []
+    checked, invalid, matches, discovery_leads = [], [], [], []
     seen = set()
     for n, event in enumerate(events, 1):
         reasons = []
@@ -93,9 +93,19 @@ def main():
         if reasons: invalid.append(row)
         if matched and not reasons and not duplicate:
             matches.append(row)
+        if matched and not duplicate and row.get("research_status") == "unverified_search_lead" and reasons and set(reasons) <= {"venue_not_in_registry"}:
+            row["validation_status"] = "discovery_lead_needs_venue_verification"
+            discovery_leads.append(row)
     OUT.mkdir(parents=True, exist_ok=True)
     (OUT / "validated_events.json").write_text(json.dumps(checked, ensure_ascii=False, indent=2), encoding="utf-8")
     (OUT / "artist_matches.json").write_text(json.dumps(matches, ensure_ascii=False, indent=2), encoding="utf-8")
+    (OUT / "artist_discovery_leads.json").write_text(json.dumps(discovery_leads, ensure_ascii=False, indent=2), encoding="utf-8")
+    with (OUT / "artist_discovery_leads.csv").open("w", encoding="utf-8", newline="") as f:
+        fields = ["date", "event_title", "matched_artists", "venue_room", "event_url", "source_type", "evidence_quote", "validation_status"]
+        writer = csv.DictWriter(f, fieldnames=fields, extrasaction="ignore")
+        writer.writeheader()
+        for row in discovery_leads:
+            writer.writerow({**row, "matched_artists": "; ".join(row.get("matched_artists", []))})
 
     # Human-readable report and flat CSV outputs make the result usable without
     # opening JSON, while keeping source/coverage caveats visible.
@@ -137,7 +147,8 @@ def main():
         f"- Valid candidates: {summary['valid_candidate_count']}",
         f"- Invalid candidates: {len(invalid)}",
         f"- Duplicate candidates: {summary['duplicate_candidate_count']}",
-        f"- Artist-match leads: {len(matches)}",
+        f"- Artist-match leads (venue validated): {len(matches)}",
+        f"- Discovery leads awaiting venue verification: {len(discovery_leads)}",
         f"- Venue pages fetched: {summary['venues_fetched']}/{len(venue_rows)}",
         f"- Venues marked complete: {summary['venues_complete']}/{len(venue_rows)}",
         "",
