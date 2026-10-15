@@ -36,6 +36,13 @@ jobs:
           WINDOW_END: ${{ inputs.window_end }}
           RUN_DIR: artifacts/current
         run: python -m hybrid.research
+      - name: Discover events through free public web search
+        env:
+          WINDOW_START: ${{ inputs.window_start }}
+          WINDOW_END: ${{ inputs.window_end }}
+          RUN_DIR: artifacts/current
+          SEARCH_MAX_QUERIES: '90'
+        run: python -m hybrid.search_discovery
       - name: Deterministic validation and artist matching
         if: always() && hashFiles('artifacts/current/research_events.json') != ''
         env:
