@@ -43,6 +43,13 @@ jobs:
           WINDOW_END: ${{ inputs.window_end }}
           RUN_DIR: artifacts/current
         run: python -m hybrid.research
+      - name: Deterministic event validation and artist matching
+        if: always() && hashFiles('artifacts/current/research_events.json') != ''
+        env:
+          WINDOW_START: ${{ inputs.window_start }}
+          WINDOW_END: ${{ inputs.window_end }}
+          RUN_DIR: artifacts/current
+        run: python -m hybrid.match
       - name: Upload research evidence and coverage ledger
         if: always()
         uses: actions/upload-artifact@v4
