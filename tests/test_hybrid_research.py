@@ -1,7 +1,7 @@
 import datetime as dt
 import unittest
 from hybrid.research import PageParser, extract_events, relevant_links, walk_jsonld
-from hybrid.search_discovery import parse_date
+from unittest.mock import patch\nfrom hybrid.search_discovery import parse_date, SearchParser, _normalise_search_results, search_html
 
 class ResearchTests(unittest.TestCase):
     def test_jsonld_event_extracted_within_window(self):
@@ -48,6 +48,37 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(parse_date('Tickets 20 October 2026 live', start, end), '2026-10-20')
         self.assertEqual(parse_date('Event date 2026-10-22', start, end), '2026-10-22')
         self.assertEqual(parse_date('Event 2026-11-02', start, end), '')
+
+    def test_search_parser_reads_duckduckgo_result_links(self):
+        body = '<div class="result"><a class="result__a" href="https://example.org/gig">Gig Listing</a><a class="result__snippet">Fri 16 Oct 2026</a></div>'
+        parser = SearchParser()
+        parser.feed(body)
+        results = _normalise_search_results(parser.results, "DuckDuckGo HTML")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Gig Listing")
+        self.assertEqual(results[0]["url"], "https://example.org/gig")
+
+    def test_search_parser_reads_bing_result_links(self):
+        body = '<li class="b_algo"><h2><a href="https://example.org/gig">Gig Listing</a></h2><div class="b_caption"><p>Fri 16 Oct 2026</p></div></li>'
+        parser = SearchParser()
+        parser.feed(body)
+        results = _normalise_search_results(parser.results, "Bing HTML")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["title"], "Gig Listing")
+
+    def test_search_html_falls_back_to_next_provider(self):
+        with patch("hybrid.search_discovery._fetch_search_page", side_effect=[
+            RuntimeError("blocked"),
+            '<a class="result-link" href="https://example.org/gig">Gig Listing</a>'
+        ]):
+            results = search_html("Newcastle gig")
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0]["search_provider"], "DuckDuckGo Lite")
+
+    def test_search_html_fails_loudly_when_all_frontends_are_unreadable(self):
+        with patch("hybrid.search_discovery._fetch_search_page", return_value="<html>challenge</html>"):
+            with self.assertRaisesRegex(RuntimeError, "All free search frontends failed"):
+                search_html("Newcastle gig")
 
     def test_visible_listing_without_jsonld_extracts_dated_bill(self):
         from hybrid.research import extract_visible_events
