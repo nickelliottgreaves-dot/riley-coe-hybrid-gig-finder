@@ -162,7 +162,7 @@ def main():
         lines.append(f"- **{row.get('venue','Unknown')}** — {row.get('status','unknown')}; {row.get('events',0)} structured events.")
         for limitation in row.get("limitations", []):
             lines.append(f"  - Limitation: {limitation}")
-    (OUT / "report.md").write_text("\\n".join(lines) + "\\n", encoding="utf-8")
+    (OUT / "report.md").write_text("\n".join(lines) + "\n", encoding="utf-8")
 
     print(f"Deterministic matching: {len(index)} artist names/aliases; {len(events)} events; {len(matches)} candidate matches; {len(invalid)} invalid.")
     return 0
