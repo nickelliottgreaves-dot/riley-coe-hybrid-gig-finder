@@ -1,0 +1,53 @@
+name: Hybrid gig finder v2
+on:
+  workflow_dispatch:
+    inputs:
+      window_start:
+        description: "Inclusive start date (YYYY-MM-DD); blank means today UTC"
+        required: false
+        type: string
+      window_end:
+        description: "Inclusive end date (YYYY-MM-DD); blank means start + 13 days"
+        required: false
+        type: string
+  schedule:
+    - cron: "0 8 * * 1"
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: hybrid-gig-finder-v2
+  cancel-in-progress: false
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Require API configuration
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        run: |
+          if [ -z "$OPENAI_API_KEY" ]; then
+            echo "::error::Repository secret OPENAI_API_KEY is missing; no scraping-only fallback is permitted."
+            exit 2
+          fi
+      - name: Run web-search research
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: gpt-4.1-mini
+          WINDOW_START: ${{ inputs.window_start }}
+          WINDOW_END: ${{ inputs.window_end }}
+          RUN_DIR: artifacts/current
+        run: python -m hybrid.research
+      - name: Upload research evidence and coverage ledger
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: hybrid-gig-finder-${{ github.run_number }}
+          path: artifacts/current/
+          if-no-files-found: warn
+          retention-days: 90
