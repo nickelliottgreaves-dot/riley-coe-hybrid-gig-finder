@@ -1,5 +1,7 @@
 name: Hybrid gig finder v2
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
       window_start:
