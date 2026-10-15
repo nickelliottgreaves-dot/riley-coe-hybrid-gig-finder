@@ -12,6 +12,25 @@ class ResearchTests(unittest.TestCase):
         self.assertEqual(events[0]["event_url"], "https://example.org/events/test")
         self.assertEqual(events[0]["artists"], ["Test Band"])
 
+    def test_schema_event_type_variants_are_recognized(self):
+        for event_type in ("Event", "MusicEvent", "Music Event", "Festival"):
+            with self.subTest(event_type=event_type):
+                parser = PageParser()
+                parser.feed(
+                    f'<script type="application/ld+json">'
+                    f'{{"@type":"{event_type}","name":"Variant Show",'
+                    f'"startDate":"2026-10-20","url":"/variant"}}'
+                    f'</script>'
+                )
+                events = extract_events(
+                    parser,
+                    "Venue",
+                    "https://example.org/",
+                    dt.date(2026, 10, 15),
+                    dt.date(2026, 10, 28),
+                )
+                self.assertEqual(len(events), 1)
+
     def test_event_outside_window_is_excluded(self):
         parser = PageParser()
         parser.feed("""<script type="application/ld+json">{"@type":"Event","name":"Past Show","startDate":"2026-09-01","url":"/past"}</script>""")
