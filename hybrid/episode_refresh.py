@@ -18,12 +18,17 @@ TIMEOUT, MAX_BYTES, MAX_EPISODES = 18, 2_000_000, 24
 class Page(HTMLParser):
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.links, self.text, self._a, self._script, self._script_data = [], [], None, False, []
+        self.links, self.text, self.artist_nodes, self._a, self._artist_node, self._script, self._script_data = [], [], [], None, None, False, []
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         if tag == "a" and a.get("href"):
             self._a = {"href": a["href"], "text": ""}
             self.links.append(self._a)
+        classes = set((a.get("class") or "").lower().split())
+        if classes.intersection({"artist", "track-artist", "tracklist-artist", "artist-name", "music-artist"}):
+            self._artist_node = {"depth": 1, "text": ""}
+        elif self._artist_node is not None:
+            self._artist_node["depth"] += 1
         if tag == "script" and "ld+json" in (a.get("type") or "").lower():
             self._script, self._script_data = True, []
     def handle_data(self, data):
@@ -31,8 +36,15 @@ class Page(HTMLParser):
         else:
             self.text.append(data)
             if self._a is not None: self._a["text"] += data
+            if self._artist_node is not None: self._artist_node["text"] += data
     def handle_endtag(self, tag):
         if tag == "a": self._a = None
+        if self._artist_node is not None:
+            self._artist_node["depth"] -= 1
+            if self._artist_node["depth"] <= 0:
+                name = clean(self._artist_node["text"])
+                if name: self.artist_nodes.append(name)
+                self._artist_node = None
         if tag == "script" and self._script: self._script = False
 
 def fetch(url):
@@ -64,7 +76,7 @@ def parse_tracklist(body):
     text = clean(" ".join(p.text))
     # RadioFiles page markup exposes track names and artists as adjacent repeated text;
     # BBC programme pages expose "Music Played" blocks with artist headings.
-    artists = []
+    artists = list(p.artist_nodes)
     patterns = [
         r"(?m)(?:Artist|artist)\s*[:\n]\s*([^\n]{2,100})",
         r"(?m)(?:by|By)\s+([^\n]{2,100})",
