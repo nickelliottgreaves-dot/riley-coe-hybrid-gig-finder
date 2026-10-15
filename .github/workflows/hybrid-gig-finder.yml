@@ -17,7 +17,7 @@ on:
 permissions:
   contents: read
 concurrency:
-  group: hybrid-gig-finder-v2
+  group: hybrid-gig-finder-v2-${{ github.sha }}
   cancel-in-progress: false
 jobs:
   research:
