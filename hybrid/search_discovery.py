@@ -14,47 +14,122 @@ TIMEOUT = 15
 MAX_BYTES = 1_500_000
 
 class SearchParser(HTMLParser):
+    """Tolerant parser for DuckDuckGo HTML/lite and Bing's public HTML results."""
     def __init__(self):
         super().__init__(convert_charrefs=True)
-        self.results, self._a, self._snippet = [], None, None
+        self.results = []
+        self._active = None
+        self._capture = None
+        self._in_h2 = False
+
     def handle_starttag(self, tag, attrs):
         a = dict(attrs)
         classes = set((a.get("class") or "").split())
-        if tag == "a" and "result__a" in classes:
-            self._a = {"url": a.get("href", ""), "title": ""}
-        if tag in ("a", "div") and ("result__snippet" in classes or "result__title" in classes):
-            self._snippet = {"class": "snippet" if "result__snippet" in classes else "title", "text": ""}
+        href = a.get("href", "")
+        # DDG full HTML and lite templates.
+        if tag == "a" and ({"result__a", "result-link"} & classes):
+            self._active = {"url": href, "title": "", "snippet": ""}
+        # Bing result links are nested in h2.
+        elif tag == "h2":
+            self._in_h2 = True
+        elif tag == "a" and self._in_h2:
+            self._active = {"url": href, "title": "", "snippet": ""}
+        if tag in ("a", "div", "p") and ({"result__snippet", "result-snippet", "b_caption"} & classes):
+            self._capture = {"text": "", "depth": 1, "tag": tag}
+
     def handle_data(self, data):
-        if self._a is not None: self._a["title"] += data
-        if self._snippet is not None: self._snippet["text"] += data
+        if self._active is not None:
+            self._active["title"] += data
+        if self._capture is not None:
+            self._capture["text"] += data
+
     def handle_endtag(self, tag):
-        if tag == "a" and self._a is not None:
-            if self._a.get("title") and self._a.get("url"):
-                self.results.append(self._a)
-            self._a = None
-        if tag in ("a", "div") and self._snippet is not None:
-            # Snippet blocks may contain nested tags; end early when meaningful text is captured.
-            if self._snippet["text"].strip():
-                if self.results and self._snippet["class"] == "snippet":
-                    self.results[-1]["snippet"] = self._snippet["text"].strip()
-                self._snippet = None
+        if tag == "h2":
+            self._in_h2 = False
+        if tag == "a" and self._active is not None:
+            title = " ".join(self._active["title"].split())
+            url = self._active["url"]
+            if title and url and url not in ("#", "/"):
+                self.results.append({**self._active, "title": title})
+            self._active = None
+        if self._capture is not None and tag == self._capture["tag"]:
+            snippet = " ".join(self._capture["text"].split())
+            if snippet and self.results and not self.results[-1].get("snippet"):
+                self.results[-1]["snippet"] = snippet
+            self._capture = None
+
+
+def _normalise_search_results(rows, provider):
+    results = []
+    for row in rows:
+        target = html.unescape((row.get("url") or "").strip())
+        # DDG redirect links may be relative or protocol-relative.
+        if target.startswith("//"):
+            target = "https:" + target
+        if target.startswith("/"):
+            target = urllib.parse.urljoin("https://html.duckduckgo.com", target)
+        m = re.search(r"[?&]uddg=([^&]+)", target)
+        if m:
+            target = urllib.parse.unquote(m.group(1))
+        if not target.startswith("http"):
+            continue
+        if any(host in urllib.parse.urlparse(target).netloc.lower()
+               for host in ("duckduckgo.com", "bing.com")):
+            continue
+        if target not in {x["url"] for x in results}:
+            results.append({"url": target, "title": " ".join(row.get("title", "").split()),
+                            "snippet": " ".join(row.get("snippet", "").split()),
+                            "search_provider": provider})
+    return results
+
+
+def _fetch_search_page(url):
+    req = urllib.request.Request(url, headers={
+        "User-Agent": UA,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "en-GB,en;q=0.9",
+        "Cache-Control": "no-cache",
+    })
+    with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
+        status = getattr(response, "status", 200)
+        body = response.read(MAX_BYTES).decode("utf-8", "replace")
+    if status < 200 or status >= 300:
+        raise RuntimeError(f"search provider HTTP {status}")
+    low = body.lower()
+    if any(marker in low for marker in ("captcha", "unusual traffic", "verify you are human", "automated queries")):
+        raise RuntimeError("search provider returned a bot/challenge page")
+    return body
+
 
 def search_html(query):
-    url = "https://html.duckduckgo.com/html/?" + urllib.parse.urlencode({"q": query})
-    req = urllib.request.Request(url, headers={"User-Agent": UA, "Accept": "text/html"})
-    with urllib.request.urlopen(req, timeout=TIMEOUT) as response:
-        body = response.read(MAX_BYTES).decode("utf-8", "replace")
-    parser = SearchParser(); parser.feed(body)
-    # DDG's result anchors sometimes point through a redirect wrapper.
-    results = []
-    for row in parser.results:
-        target = html.unescape(row["url"])
-        m = re.search(r"[?&]uddg=([^&]+)", target)
-        if m: target = urllib.parse.unquote(m.group(1))
-        if target.startswith("https://") and target not in {x["url"] for x in results}:
-            results.append({"url": target, "title": " ".join(row["title"].split()),
-                            "snippet": " ".join(row.get("snippet", "").split())})
-    return results
+    """Try multiple free HTML search frontends; never silently call an unreadable page 'zero results'."""
+    providers = [
+        ("DuckDuckGo HTML", "https://html.duckduckgo.com/html/?"),
+        ("DuckDuckGo Lite", "https://lite.duckduckgo.com/lite/?"),
+        ("Bing HTML", "https://www.bing.com/search?"),
+    ]
+    failures = []
+    genuine_empty = False
+    for provider, base in providers:
+        try:
+            url = base + urllib.parse.urlencode({"q": query})
+            body = _fetch_search_page(url)
+            parser = SearchParser()
+            parser.feed(body)
+            results = _normalise_search_results(parser.results, provider)
+            if results:
+                return results
+            low = body.lower()
+            if "no results found" in low or "there are no results" in low:
+                genuine_empty = True
+                continue
+            failures.append(f"{provider}: HTTP succeeded but no recognised result links")
+        except Exception as exc:
+            failures.append(f"{provider}: {type(exc).__name__}: {str(exc)[:160]}")
+    if genuine_empty and not failures:
+        return []
+    raise RuntimeError("All free search frontends failed to produce parseable results; " + " | ".join(failures))
+
 
 def parse_date(text, start, end):
     text = text or ""
@@ -135,7 +210,7 @@ def main():
                       "event_url":result["url"],"ticket_url":"","evidence_quote":result["snippet"] or result["title"],
                       "source_type":"public_web_search","confidence":"low","notes":"Search-engine discovery lead; verify original event listing before relying on it.",
                       "research_venue":venue if venue in {v.get("venue","") for v in venues} else "",
-                      "research_status":"unverified_search_lead","source_page":"DuckDuckGo HTML search",
+                      "research_status":"unverified_search_lead","source_page":result.get("search_provider", "Free web search"),
                       "retrieved_at":lead["retrieved_at"]})
         except Exception as exc:
             row["error"] = f"{type(exc).__name__}: {str(exc)[:240]}"
